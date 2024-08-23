@@ -6,6 +6,7 @@ import time
 import traceback
 import urllib3
 from asterisk.ami import AMIClient, EventListener, SimpleAction
+from xml.sax.saxutils import escape
 
 # Ignore SSL warnings, as all phone certificates have MAC as their CN
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -28,36 +29,30 @@ client.login(username=AMI_USER, secret=AMI_PASSWORD)
 aor = set()
 parked_calls = dict()
 
-def beep(ip):
-    xml = """<?xml version='1.0' encoding='ISO-8859-1' ?>
-        <YealinkIPPhoneExecute
-            Beep="yes"
-        >
-            <ExecuteItem URI="Wav.Play:http://""" + FREEPBX_HOST + """:80/beep-09.wav" />
-        </YealinkIPPhoneExecute>"""
-    headers = {"Content-Type": "text/xml", "Host": ip, "Referer": FREEPBX_HOST}
-    requests.post("https://" + ip + "/servlet?push=xml", headers=headers, data=xml, verify=False)
-
 def event_listener(event, **kwargs):
     global aor, parked_calls
     try:
         if (event.name == "ParkedCall" and "ActionID" in event):
             parked_calls[event["ParkingSpace"]] = {"Name": event["ParkeeCallerIDName"], "Duration": event["ParkingDuration"]}
         if (event.name == "ParkedCallsComplete"):
-            parked_calls_xml = """<?xml version='1.0' encoding='ISO-8859-1' ?>
-             <YealinkIPPhoneStatus Beep="no">"""
+            
+            pastthreshold = []
+            
+            for i in range(PARKING_LOT + 1, PARKING_LOT + PARKING_SPACES + 1):
+                if str(i) in parked_calls.keys():
+                    if int(parked_calls[str(i)]["Duration"]) > THRESHOLD:
+                        pastthreshold.append(i - PARKING_LOT)
 
-            pastthreshold = False
+            parked_calls_xml = "<?xml version='1.0' encoding='ISO-8859-1' ?><YealinkIPPhoneStatus Beep=\"" + ("no" if len(pastthreshold) == 0 else "yes") + """" Timeout="15">"""
 
+           
             for i in range(PARKING_LOT + 1, PARKING_LOT + PARKING_SPACES + 1):
                 if str(i) not in parked_calls.keys():
                     parked_calls_xml += "<Message Size=\"double\">Empty</Message>"
                 else:
+                    color = "red" if (i - PARKING_LOT) in pastthreshold else "white" 
                     x = parked_calls[str(i)]
-                    pastthreshold = int(x["Duration"]) > THRESHOLD
-                    color = "red" if pastthreshold else "white" 
-                    x = parked_calls[str(i)]
-                    parked_calls_xml += "<Message Size=\"double\" Color=\"" + color + "\">" + x["Name"][:12] + (x["Name"][12:] and "..") + ": " + str(datetime.timedelta(seconds=int(x["Duration"]))) + "</Message>"
+                    parked_calls_xml += "<Message Size=\"double\" Color=\"" + color + "\">" + escape(x["Name"][:12] + (x["Name"][12:] and "..")) + ": " + str(datetime.timedelta(seconds=int(x["Duration"]))) + "</Message>"
 
             parked_calls_xml += "</YealinkIPPhoneStatus>"
 
@@ -69,8 +64,8 @@ def event_listener(event, **kwargs):
                             "Content-Length": str(len(parked_calls_xml)),
                             "Connection": "Keep-Alive"}
                     r = requests.post("https://" + ip + "/servlet?push=xml", headers=headers, data=parked_calls_xml, verify=False)
-                    if pastthreshold:
-                        beep(ip)
+                    for line in pastthreshold:
+                        beep(ip, line)
                 except Exception as e:
                     print(e)
                     print(traceback.print_exc())
@@ -98,6 +93,6 @@ try:
         elif i == 60:
             i = -1
         i += 1
-        time.sleep(1)
+        time.sleep(10)
 except (KeyboardInterrupt, SystemExit):
     client.logoff()
